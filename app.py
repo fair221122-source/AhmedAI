@@ -50,16 +50,13 @@ def detect_bos(df):
 def detect_choch(df):
     if len(df) < 6:
         return None
-    # نستخدم نفس منطق الاتجاه لكن نراقب كسر عكسي
     last_high = df["high"].iloc[-2]
     last_low = df["low"].iloc[-2]
     close = df["close"].iloc[-1]
     prev_close = df["close"].iloc[-5]
 
-    # إذا كان كان هابط ثم حصل كسر لأعلى → CHOCH_UP
     if close > last_high and close > prev_close:
         return "CHOCH_UP"
-    # إذا كان كان صاعد ثم حصل كسر لأسفل → CHOCH_DOWN
     if close < last_low and close < prev_close:
         return "CHOCH_DOWN"
     return None
@@ -121,7 +118,13 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
     if ob["bullish_ob"] is None and ob["bearish_ob"] is None:
         return {"type": "NONE"}
 
-    signal = {"type": "NONE"}
+    signal = {
+        "type": "NONE",
+        "trend": trend,
+        "bos": bos,
+        "choch": choch,
+        "fvg": fvg
+    }
 
     # BUY: اتجاه صاعد + (BOS_UP أو CHOCH_UP) + Bullish OB
     if trend == "uptrend" and (bos == "BOS_UP" or choch == "CHOCH_UP") and ob["bullish_ob"] is not None:
@@ -134,9 +137,6 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
             "stop": stop,
             "size": size,
             "target": liq["liquidity_above"],
-            "fvg": fvg,
-            "bos": bos,
-            "choch": choch
         })
 
     # SELL: اتجاه هابط + (BOS_DOWN أو CHOCH_DOWN) + Bearish OB
@@ -150,12 +150,47 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
             "stop": stop,
             "size": size,
             "target": liq["liquidity_below"],
-            "fvg": fvg,
-            "bos": bos,
-            "choch": choch
         })
 
     return signal
+
+# -------- تحليل السوق العام من Binance --------
+def get_market_tickers():
+    url = "https://api.binance.com/api/v3/ticker/24hr"
+    data = requests.get(url).json()
+    if not isinstance(data, list):
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    # نركز على أزواج USDT فقط
+    df = df[df["symbol"].str.endswith("USDT")]
+    df["priceChangePercent"] = df["priceChangePercent"].astype(float)
+    df["quoteVolume"] = df["quoteVolume"].astype(float)
+    return df
+
+def market_overview():
+    df = get_market_tickers()
+    if df.empty:
+        return None
+
+    gainers = df.sort_values("priceChangePercent", ascending=False).head(3)
+    losers = df.sort_values("priceChangePercent", ascending=True).head(3)
+    top_volume = df.sort_values("quoteVolume", ascending=False).head(5)
+
+    avg_change = df["priceChangePercent"].mean()
+    if avg_change > 1:
+        bias = "السوق يميل للصعود"
+    elif avg_change < -1:
+        bias = "السوق يميل للهبوط"
+    else:
+        bias = "السوق متذبذب / محايد"
+
+    return {
+        "bias": bias,
+        "avg_change": avg_change,
+        "gainers": gainers[["symbol", "priceChangePercent"]],
+        "losers": losers[["symbol", "priceChangePercent"]],
+        "top_volume": top_volume[["symbol", "quoteVolume"]]
+    }
 
 # -------- واجهة Streamlit --------
 st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
@@ -172,39 +207,131 @@ intervals = {
     "عالي 4h": "4h"
 }
 
-rows = [
-    ["قصير 5m", "قصير 15m"],
-    ["متوسط 1h", "عالي 4h"]
-]
+# نخزن نتائج الفريمات للملخص
+frame_results = {}
 
-for row in rows:
-    cols = st.columns(2)
-    for i, label in enumerate(row):
-        interval = intervals[label]
-        with cols[i]:
-            st.subheader(label)
+# صف أول: 5m - 15m - 1h
+row1 = st.columns(3)
+labels_row1 = ["قصير 5m", "قصير 15m", "متوسط 1h"]
 
-            df = get_klines(symbol=symbol, interval=interval)
+for col, label in zip(row1, labels_row1):
+    interval = intervals[label]
+    with col:
+        st.subheader(label)
+        df = get_klines(symbol=symbol, interval=interval)
+        if df.empty or len(df) < 20:
+            st.error("⚠️ لا توجد بيانات كافية لهذا الفريم.")
+            frame_results[label] = {"trend": "no-data", "signal": "NONE"}
+            continue
 
-            if df.empty or len(df) < 20:
-                st.error("⚠️ لا توجد بيانات كافية لهذا الفريم.")
-                continue
+        signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
+        frame_results[label] = {
+            "trend": signal.get("trend", "no-data"),
+            "signal": signal.get("type", "NONE")
+        }
 
-            signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
+        st.line_chart(df[["close"]])
 
-            st.line_chart(df[["close"]])
+        st.markdown(f"**الاتجاه:** {signal.get('trend')}")
+        st.markdown(f"**BOS:** {signal.get('bos')}")
+        st.markdown(f"**CHOCH:** {signal.get('choch')}")
 
-            st.markdown(f"**الاتجاه:** {market_structure(df)}")
-            st.markdown(f"**BOS:** {detect_bos(df)}")
-            st.markdown(f"**CHOCH:** {detect_choch(df)}")
+        if signal["type"] != "NONE":
+            st.success(f"إشارة: {signal['type']}")
+            st.write(f"دخول: {signal['entry']}")
+            st.write(f"وقف خسارة: {signal['stop']}")
+            st.write(f"هدف: {signal['target']}")
+            st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
+        else:
+            st.warning("لا توجد إشارة دخول متوافقة مع الشروط حالياً.")
 
-            if signal["type"] != "NONE":
-                st.success(f"إشارة: {signal['type']}")
-                st.write(f"دخول: {signal['entry']}")
-                st.write(f"وقف خسارة: {signal['stop']}")
-                st.write(f"هدف: {signal['target']}")
-                st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
-            else:
-                st.warning("لا توجد إشارة دخول متوافقة مع الشروط حالياً.")
+        st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
 
-            st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
+# صف ثاني: 4h - Summary - Market Analysis
+row2 = st.columns(3)
+labels_row2 = ["عالي 4h"]
+
+# مربع 4h
+with row2[0]:
+    label = "عالي 4h"
+    interval = intervals[label]
+    st.subheader(label)
+    df = get_klines(symbol=symbol, interval=interval)
+    if df.empty or len(df) < 20:
+        st.error("⚠️ لا توجد بيانات كافية لهذا الفريم.")
+        frame_results[label] = {"trend": "no-data", "signal": "NONE"}
+    else:
+        signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
+        frame_results[label] = {
+            "trend": signal.get("trend", "no-data"),
+            "signal": signal.get("type", "NONE")
+        }
+
+        st.line_chart(df[["close"]])
+
+        st.markdown(f"**الاتجاه:** {signal.get('trend')}")
+        st.markdown(f"**BOS:** {signal.get('bos')}")
+        st.markdown(f"**CHOCH:** {signal.get('choch')}")
+
+        if signal["type"] != "NONE":
+            st.success(f"إشارة: {signal['type']}")
+            st.write(f"دخول: {signal['entry']}")
+            st.write(f"وقف خسارة: {signal['stop']}")
+            st.write(f"هدف: {signal['target']}")
+            st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
+        else:
+            st.warning("لا توجد إشارة دخول متوافقة مع الشروط حالياً.")
+
+        st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
+
+# مربع الملخص Summary
+with row2[1]:
+    st.subheader("📊 ملخص الفريمات")
+    if frame_results:
+        for frame, res in frame_results.items():
+            st.markdown(f"**{frame}** → اتجاه: {res['trend']} | إشارة: {res['signal']}")
+        # اتجاه عام بسيط
+        buy_count = sum(1 for r in frame_results.values() if r["signal"] == "BUY")
+        sell_count = sum(1 for r in frame_results.values() if r["signal"] == "SELL")
+        if buy_count > sell_count and buy_count >= 2:
+            st.success("الاتجاه العام يميل للشراء (Confluence BUY).")
+        elif sell_count > buy_count and sell_count >= 2:
+            st.error("الاتجاه العام يميل للبيع (Confluence SELL).")
+        else:
+            st.warning("لا يوجد توافق قوي بين الفريمات حالياً.")
+    else:
+        st.write("لا توجد بيانات كافية لعرض الملخص.")
+
+# مربع تحليل السوق Market Analysis
+with row2[2]:
+    st.subheader("🌍 تحليل السوق العام")
+    analyze = st.button("تحليل السوق الآن")
+    if analyze:
+        overview = market_overview()
+        if overview is None:
+            st.error("تعذر جلب بيانات السوق حالياً.")
+        else:
+            st.markdown(f"**حالة السوق العامة:** {overview['bias']}")
+            st.markdown(f"متوسط نسبة التغيير في السوق: {overview['avg_change']:.2f}%")
+
+            st.markdown("### 📈 أقوى 3 عملات صاعدة")
+            st.table(overview["gainers"].rename(columns={
+                "symbol": "العملة",
+                "priceChangePercent": "نسبة التغيير %"
+            }))
+
+            st.markdown("### 📉 أقوى 3 عملات هابطة")
+            st.table(overview["losers"].rename(columns={
+                "symbol": "العملة",
+                "priceChangePercent": "نسبة التغيير %"
+            }))
+
+            st.markdown("### 💰 أعلى 5 عملات من حيث حجم التداول")
+            top_vol = overview["top_volume"].copy()
+            top_vol["quoteVolume"] = top_vol["quoteVolume"].round(0)
+            st.table(top_vol.rename(columns={
+                "symbol": "العملة",
+                "quoteVolume": "حجم التداول (تقريبي)"
+            }))
+    else:
+        st.info("اضغط على زر (تحليل السوق الآن) لعرض أنشط العملات واتجاه السوق.")
