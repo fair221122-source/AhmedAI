@@ -1,34 +1,24 @@
 import streamlit as st
-from binance.client import Client
 import pandas as pd
 import numpy as np
+import requests
 
-# -------- إعداد Binance Futures --------
-api_key = st.secrets["BINANCE_API_KEY"]
-api_secret = st.secrets["BINANCE_API_SECRET"]
-
-client = Client(api_key, api_secret)
-
-# -------- جلب الشموع --------
+# -------- جلب الشموع من Binance Public API --------
 def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
-    data = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    data = requests.get(url).json()
+
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
         "close_time","qav","num_trades","taker_base","taker_quote","ignore"
     ])
+
     df["open"] = df["open"].astype(float)
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
     df["close"] = df["close"].astype(float)
-    return df
 
-# -------- جلب الرصيد الحقيقي --------
-def get_futures_balance():
-    balances = client.futures_account_balance()
-    for asset in balances:
-        if asset["asset"] == "USDT":
-            return float(asset["balance"])
-    return 0.0
+    return df
 
 # -------- التحليل --------
 def market_structure(df):
@@ -131,12 +121,8 @@ st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
 
 st.title("🧠 Smart Money Concepts – Institutional Dashboard")
 
-# عرض الرصيد الحقيقي
-real_balance = get_futures_balance()
-st.info(f"💰 رصيد العقود الآجلة الحقيقي: {real_balance} USDT")
-
 symbol = st.sidebar.text_input("الزوج", "BTCUSDT")
-balance = st.sidebar.number_input("رصيد الحساب (افتراضي)", value=real_balance)
+balance = st.sidebar.number_input("رصيد الحساب (يدوي)", value=1000.0)
 risk_percent = st.sidebar.slider("نسبة المخاطرة لكل صفقة %", 0.1, 5.0, 1.0)
 
 # إضافة فريم 4h
