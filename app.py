@@ -5,34 +5,45 @@ import requests
 import plotly.graph_objects as go
 
 # ==============================
-# 1) جلب أزواج OKX Futures (SWAP)
+# 1) إعدادات الصفحة
+# ==============================
+st.set_page_config(page_title="OKX SMC Dashboard", layout="wide")
+
+if "selected_symbol" not in st.session_state:
+    st.session_state.selected_symbol = "BTC-USDT-SWAP"
+
+if "selected_interval" not in st.session_state:
+    st.session_state.selected_interval = None
+
+if "show_chart" not in st.session_state:
+    st.session_state.show_chart = False
+
+if "show_market_analysis" not in st.session_state:
+    st.session_state.show_market_analysis = False
+
+
+# ==============================
+# 2) جلب أزواج OKX Futures
 # ==============================
 def get_futures_symbols():
     url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP"
     try:
         data = requests.get(url).json()
-
         if "data" not in data:
-            st.warning("⚠️ تعذر جلب أزواج OKX Futures.")
             return []
-
-        symbols = [item["instId"] for item in data["data"]]
-        return symbols
-
-    except Exception:
-        st.error("⚠️ خطأ أثناء الاتصال بـ OKX.")
+        return [item["instId"] for item in data["data"]]
+    except:
         return []
 
 
 # ==============================
-# 2) جلب الشموع من OKX
+# 3) جلب الشموع من OKX
 # ==============================
-def get_klines(symbol, interval="5m", limit=50):
+def get_klines(symbol, interval="5m", limit=200):
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={interval}&limit={limit}"
     try:
         data = requests.get(url).json()
-
-        if "data" not in data or len(data["data"]) == 0:
+        if "data" not in data:
             return pd.DataFrame()
 
         rows = []
@@ -47,16 +58,15 @@ def get_klines(symbol, interval="5m", limit=50):
             })
 
         df = pd.DataFrame(rows)
-        df = df.sort_values("time")
-        df.reset_index(drop=True, inplace=True)
-        return df
+        df = df.sort_values("time", ascending=True).reset_index(drop=True)
+        return df.tail(200).reset_index(drop=True)
 
-    except Exception:
+    except:
         return pd.DataFrame()
 
 
 # ==============================
-# 3) الاستراتيجيات (كما هي)
+# 4) الاستراتيجيات
 # ==============================
 def market_structure(df):
     if len(df) < 6:
@@ -72,40 +82,30 @@ def market_structure(df):
 def detect_bos(df):
     if len(df) < 3:
         return None
-    last_high = df["high"].iloc[-2]
-    last_low = df["low"].iloc[-2]
-    close = df["close"].iloc[-1]
-    if close > last_high:
+    if df["close"].iloc[-1] > df["high"].iloc[-2]:
         return "BOS_UP"
-    if close < last_low:
+    if df["close"].iloc[-1] < df["low"].iloc[-2]:
         return "BOS_DOWN"
     return None
 
 def detect_choch(df):
     if len(df) < 6:
         return None
-    last_high = df["high"].iloc[-2]
-    last_low = df["low"].iloc[-2]
-    close = df["close"].iloc[-1]
-    prev_close = df["close"].iloc[-5]
-
-    if close > last_high and close > prev_close:
+    last = df["close"].iloc[-1]
+    prev = df["close"].iloc[-5]
+    if last > prev:
         return "CHOCH_UP"
-    if close < last_low and close < prev_close:
+    if last < prev:
         return "CHOCH_DOWN"
     return None
 
 def liquidity_zones(df):
-    if len(df) < 20:
-        return {"liquidity_above": None, "liquidity_below": None}
     return {
         "liquidity_above": df["high"].rolling(10).max().iloc[-1],
         "liquidity_below": df["low"].rolling(10).min().iloc[-1]
     }
 
 def order_block(df):
-    if len(df) < 10:
-        return {"bullish_ob": None, "bearish_ob": None}
     bearish = df[df["close"] < df["open"]]
     bullish = df[df["close"] > df["open"]]
     if bearish.empty or bullish.empty:
@@ -116,8 +116,6 @@ def order_block(df):
     }
 
 def detect_fvg(df):
-    if len(df) < 3:
-        return []
     fvg_list = []
     for i in range(2, len(df)):
         prev_low = df["low"].iloc[i-2]
@@ -133,15 +131,12 @@ def detect_fvg(df):
 def risk_management(entry, stop, balance=1000, risk_percent=1):
     if entry is None or stop is None:
         return 0
-    stop_distance = abs(entry - stop)
-    if stop_distance == 0:
+    dist = abs(entry - stop)
+    if dist == 0:
         return 0
-    return (balance * (risk_percent / 100)) / stop_distance
+    return (balance * (risk_percent / 100)) / dist
 
-def full_smc_signal(df, balance=1000, risk_percent=1):
-    if len(df) < 20:
-        return {"type": "NONE"}
-
+def full_smc_signal(df):
     trend = market_structure(df)
     bos = detect_bos(df)
     choch = detect_choch(df)
@@ -157,173 +152,68 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
         "fvg": fvg
     }
 
-    if trend == "uptrend" and (bos == "BOS_UP" or choch == "CHOCH_UP") and ob["bullish_ob"]:
+    if trend == "uptrend" and (bos == "BOS_UP" or choch == "CHOCH_UP"):
         entry = ob["bullish_ob"]
         stop = liq["liquidity_below"]
-        size = risk_management(entry, stop, balance, risk_percent)
-        signal.update({
-            "type": "BUY",
-            "entry": entry,
-            "stop": stop,
-            "target": liq["liquidity_above"],
-            "size": size
-        })
+        size = risk_management(entry, stop)
+        signal.update({"type": "BUY", "entry": entry, "stop": stop, "target": liq["liquidity_above"], "size": size})
 
-    elif trend == "downtrend" and (bos == "BOS_DOWN" or choch == "CHOCH_DOWN") and ob["bearish_ob"]:
+    elif trend == "downtrend" and (bos == "BOS_DOWN" or choch == "CHOCH_DOWN"):
         entry = ob["bearish_ob"]
         stop = liq["liquidity_above"]
-        size = risk_management(entry, stop, balance, risk_percent)
-        signal.update({
-            "type": "SELL",
-            "entry": entry,
-            "stop": stop,
-            "target": liq["liquidity_below"],
-            "size": size
-        })
+        size = risk_management(entry, stop)
+        signal.update({"type": "SELL", "entry": entry, "stop": stop, "target": liq["liquidity_below"], "size": size})
 
     return signal
 
 
 # ==============================
-# 4) واجهة Streamlit
-# ==============================
-st.set_page_config(page_title="OKX Smart Money Dashboard", layout="wide")
-
-if "selected_symbol" not in st.session_state:
-    st.session_state.selected_symbol = "BTC-USDT-SWAP"
-
-if "selected_interval" not in st.session_state:
-    st.session_state.selected_interval = "5m"
-
-if "show_market_analysis" not in st.session_state:
-    st.session_state.show_market_analysis = False
-
-
-# ==============================
 # 5) الشريط العلوي
 # ==============================
-st.markdown("""
-<style>
-.scroll-container {
-    width: 100%;
-    overflow-x: scroll;
-    white-space: nowrap;
-    padding: 10px;
-    border-bottom: 1px solid #444;
-}
-.symbol-btn {
-    display: inline-block;
-    padding: 8px 14px;
-    margin-right: 8px;
-    background: #222;
-    color: white;
-    border-radius: 6px;
-    cursor: pointer;
-    border: 1px solid #555;
-    font-size: 15px;
-}
-.symbol-btn:hover {
-    background: #333;
-}
-.symbol-selected {
-    background: #0a84ff !important;
-    border-color: #0a84ff !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
 symbols = get_futures_symbols()
 
-html = "<div class='scroll-container'>"
-for sym in symbols:
-    cls = "symbol-btn"
-    if sym == st.session_state.selected_symbol:
-        cls += " symbol-selected"
-    html += f"<span class='{cls}' onclick=\"fetch('/?symbol={sym}')\">{sym}</span>"
-html += "</div>"
-
-st.markdown(html, unsafe_allow_html=True)
-
-pass
-
-# ==============================
-# 6) أزرار الفريمات
-# ==============================
-st.markdown("<h3>⏱️ اختر الفريم</h3>", unsafe_allow_html=True)
-
-interval_buttons = {
-    "5Min": "5m",
-    "15Min": "15m",
-    "1H": "1H",
-    "4H": "4H"
-}
-
-cols = st.columns(len(interval_buttons))
-
-for i, (label, interval) in enumerate(interval_buttons.items()):
-    if cols[i].button(label):
-        st.session_state.selected_interval = interval
-        st.session_state.show_market_analysis = False
-
-if st.button("📊 MARKET ANALYSIS"):
-    st.session_state.show_market_analysis = True
+st.markdown("### 🔥 اختر الزوج")
+cols = st.columns(5)
+i = 0
+for sym in symbols[:20]:
+    if cols[i].button(sym):
+        st.session_state.selected_symbol = sym
+    i = (i + 1) % 5
 
 
 # ==============================
-# 7) تحليل السوق
+# 6) أزرار الفريمات (أفقية)
 # ==============================
-def market_overview_okx():
-    url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
-    data = requests.get(url).json()
+st.markdown("### ⏱️ اختر الفريم")
 
-    if "data" not in data:
-        return None
+c1, c2, c3, c4 = st.columns(4)
 
-    df = pd.DataFrame(data["data"])
-    df["change"] = df["last"].astype(float) - df["open24h"].astype(float)
-    df["percent"] = (df["change"] / df["open24h"].astype(float)) * 100
-    df["vol"] = df["volCcy24h"].astype(float)
+if c1.button("5Min"):
+    st.session_state.selected_interval = "5m"
+    st.session_state.show_chart = True
 
-    gainers = df.sort_values("percent", ascending=False).head(5)
-    losers = df.sort_values("percent", ascending=True).head(5)
-    top_volume = df.sort_values("vol", ascending=False).head(5)
+if c2.button("15Min"):
+    st.session_state.selected_interval = "15m"
+    st.session_state.show_chart = True
 
-    avg_change = df["percent"].mean()
-    if avg_change > 1:
-        bias = "السوق يميل للصعود"
-    elif avg_change < -1:
-        bias = "السوق يميل للهبوط"
-    else:
-        bias = "السوق متذبذب"
+if c3.button("1H"):
+    st.session_state.selected_interval = "1H"
+    st.session_state.show_chart = True
 
-    return {
-        "bias": bias,
-        "gainers": gainers[["instId", "percent"]],
-        "losers": losers[["instId", "percent"]],
-        "top_volume": top_volume[["instId", "vol"]]
-    }
+if c4.button("4H"):
+    st.session_state.selected_interval = "4H"
+    st.session_state.show_chart = True
 
-if st.session_state.show_market_analysis:
-    st.markdown("### 📊 تحليل السوق العام")
-    if st.button("⬅️ العودة"):
-        st.session_state.show_market_analysis = False
-        st.experimental_rerun()
 
-    overview = market_overview_okx()
-    if overview:
-        st.write("حالة السوق:", overview["bias"])
-        st.write("### 🔥 أعلى 5 صاعدين")
-        st.table(overview["gainers"])
-        st.write("### ❄️ أعلى 5 هابطين")
-        st.table(overview["losers"])
-        st.write("### 💰 أعلى 5 حجم تداول")
-        st.table(overview["top_volume"])
-
+# ==============================
+# 7) إخفاء الشارت حتى يتم اختيار فريم
+# ==============================
+if not st.session_state.show_chart:
     st.stop()
 
 
 # ==============================
-# 8) جلب الشموع + الاستراتيجية
+# 8) جلب البيانات + الاستراتيجية
 # ==============================
 symbol = st.session_state.selected_symbol
 interval = st.session_state.selected_interval
@@ -331,70 +221,88 @@ interval = st.session_state.selected_interval
 df = get_klines(symbol, interval)
 
 if df.empty:
-    st.error("لا توجد بيانات كافية.")
+    st.error("لا توجد بيانات كافية")
     st.stop()
 
 signal = full_smc_signal(df)
 
 
 # ==============================
-# 9) الشارت + الملصقات
+# 9) الشارت + OB + FVG + ENTRY/STOP/TARGET
 # ==============================
-st.markdown(f"### 📈 الشارت: {symbol} — الفريم: {interval}")
+fig = go.Figure()
 
-fig = go.Figure(data=[
-    go.Candlestick(
-        x=df.index,
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"]
-    )
-])
+fig.add_trace(go.Candlestick(
+    x=df.index,
+    open=df["open"],
+    high=df["high"],
+    low=df["low"],
+    close=df["close"],
+    name="Price"
+))
+
+shapes = []
+
+# ---- Order Blocks (A) ----
+ob = order_block(df)
+if ob["bullish_ob"]:
+    shapes.append(dict(
+        type="rect",
+        x0=df.index[0],
+        x1=df.index[-1],
+        y0=ob["bullish_ob"],
+        y1=ob["bullish_ob"] + (df["high"].max() - df["low"].min()) * 0.01,
+        fillcolor="rgba(0,255,0,0.15)",
+        line=dict(color="green")
+    ))
+
+if ob["bearish_ob"]:
+    shapes.append(dict(
+        type="rect",
+        x0=df.index[0],
+        x1=df.index[-1],
+        y0=ob["bearish_ob"] - (df["high"].max() - df["low"].min()) * 0.01,
+        y1=ob["bearish_ob"],
+        fillcolor="rgba(255,0,0,0.15)",
+        line=dict(color="red")
+    ))
+
+# ---- FVG ----
+for fvg_type, low, high in detect_fvg(df):
+    color = "rgba(0,150,255,0.2)" if fvg_type == "bullish" else "rgba(255,150,0,0.2)"
+    shapes.append(dict(
+        type="rect",
+        x0=df.index[0],
+        x1=df.index[-1],
+        y0=low,
+        y1=high,
+        fillcolor=color,
+        line=dict(color=color)
+    ))
+
+# ---- ENTRY / STOP / TARGET ----
+def add_level(price, color):
+    if price:
+        shapes.append(dict(
+            type="line",
+            x0=df.index[0],
+            x1=df.index[-1],
+            y0=price,
+            y1=price,
+            line=dict(color=color, width=2, dash="dot")
+        ))
+
+add_level(signal.get("entry"), "lime")
+add_level(signal.get("stop"), "red")
+add_level(signal.get("target"), "cyan")
 
 fig.update_layout(
     template="plotly_dark",
-    height=600,
-    margin=dict(l=20, r=20, t=40, b=40)
+    height=650,
+    shapes=shapes
 )
-
-shapes = []
-annotations = []
-
-def add_level(price, color, text):
-    if price is None:
-        return
-    shapes.append(dict(
-        type="line",
-        x0=df.index[0],
-        x1=df.index[-1],
-        y0=price,
-        y1=price,
-        line=dict(color=color, width=1.5, dash="dot")
-    ))
-    annotations.append(dict(
-        x=df.index[-1],
-        y=price,
-        xanchor="left",
-        showarrow=True,
-        arrowhead=1,
-        arrowsize=1,
-        arrowwidth=1,
-        arrowcolor=color,
-        bgcolor="rgba(0,0,0,0.6)",
-        bordercolor=color,
-        borderwidth=1,
-        text=text,
-        font=dict(color="white", size=11)
-    ))
-
-add_level(signal.get("entry"), "lime", "ENTRY")
-add_level(signal.get("stop"), "red", "STOP")
-add_level(signal.get("target"), "deepskyblue", "TARGET")
-
-fig.update_layout(shapes=shapes, annotations=annotations)
 
 st.plotly_chart(fig, use_container_width=True)
 
 st.write("### 🧠 تفاصيل الاستراتيجية")
-st.write(signal)
+st.json(signal)
