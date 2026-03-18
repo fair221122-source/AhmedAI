@@ -5,35 +5,55 @@ import requests
 import plotly.graph_objects as go
 
 # ==============================
-# 1) جلب أزواج Binance Futures
+# 1) جلب أزواج OKX Futures (SWAP)
 # ==============================
 def get_futures_symbols():
-    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-    data = requests.get(url).json()
-    symbols = [s["symbol"] for s in data["symbols"] if s["contractType"] == "PERPETUAL"]
-    return symbols
+    url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP"
+    try:
+        data = requests.get(url).json()
+
+        if "data" not in data:
+            st.warning("⚠️ تعذر جلب أزواج OKX Futures.")
+            return []
+
+        symbols = [item["instId"] for item in data["data"]]
+        return symbols
+
+    except Exception:
+        st.error("⚠️ خطأ أثناء الاتصال بـ OKX.")
+        return []
+
 
 # ==============================
-# 2) جلب الشموع من Binance
+# 2) جلب الشموع من OKX
 # ==============================
 def get_klines(symbol, interval="5m", limit=50):
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    data = requests.get(url).json()
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={interval}&limit={limit}"
+    try:
+        data = requests.get(url).json()
 
-    if not isinstance(data, list) or len(data) < 10:
+        if "data" not in data or len(data["data"]) == 0:
+            return pd.DataFrame()
+
+        rows = []
+        for c in data["data"]:
+            rows.append({
+                "time": int(c[0]),
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
+                "volume": float(c[5])
+            })
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values("time")
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    except Exception:
         return pd.DataFrame()
 
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "close_time","qav","num_trades","taker_base","taker_quote","ignore"
-    ])
-
-    df["open"] = df["open"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["close"] = df["close"].astype(float)
-
-    return df
 
 # ==============================
 # 3) الاستراتيجيات (كما هي)
@@ -162,15 +182,15 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
         })
 
     return signal
-# ==============================
-# 4) واجهة Streamlit — الشريط العلوي
-# ==============================
 
-st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
 
-# نستخدم session_state لحفظ الزوج المختار والفريم المختار
+# ==============================
+# 4) واجهة Streamlit
+# ==============================
+st.set_page_config(page_title="OKX Smart Money Dashboard", layout="wide")
+
 if "selected_symbol" not in st.session_state:
-    st.session_state.selected_symbol = "BTCUSDT"
+    st.session_state.selected_symbol = "BTC-USDT-SWAP"
 
 if "selected_interval" not in st.session_state:
     st.session_state.selected_interval = "5m"
@@ -178,73 +198,67 @@ if "selected_interval" not in st.session_state:
 if "show_market_analysis" not in st.session_state:
     st.session_state.show_market_analysis = False
 
+
+# ==============================
+# 5) الشريط العلوي
+# ==============================
 st.markdown("""
-    <style>
-        .scroll-container {
-            width: 100%;
-            overflow-x: scroll;
-            white-space: nowrap;
-            padding: 10px;
-            border-bottom: 1px solid #444;
-        }
-        .symbol-btn {
-            display: inline-block;
-            padding: 8px 14px;
-            margin-right: 8px;
-            background: #222;
-            color: white;
-            border-radius: 6px;
-            cursor: pointer;
-            border: 1px solid #555;
-            font-size: 15px;
-        }
-        .symbol-btn:hover {
-            background: #333;
-        }
-        .symbol-selected {
-            background: #0a84ff !important;
-            border-color: #0a84ff !important;
-        }
-    </style>
+<style>
+.scroll-container {
+    width: 100%;
+    overflow-x: scroll;
+    white-space: nowrap;
+    padding: 10px;
+    border-bottom: 1px solid #444;
+}
+.symbol-btn {
+    display: inline-block;
+    padding: 8px 14px;
+    margin-right: 8px;
+    background: #222;
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid #555;
+    font-size: 15px;
+}
+.symbol-btn:hover {
+    background: #333;
+}
+.symbol-selected {
+    background: #0a84ff !important;
+    border-color: #0a84ff !important;
+}
+</style>
 """, unsafe_allow_html=True)
 
-# جلب أزواج Binance Futures
 symbols = get_futures_symbols()
 
-# الشريط العلوي
-st.markdown("<h3 style='margin-top:0;'>📌 اختر زوج العملات</h3>", unsafe_allow_html=True)
-
 html = "<div class='scroll-container'>"
-
 for sym in symbols:
     cls = "symbol-btn"
     if sym == st.session_state.selected_symbol:
         cls += " symbol-selected"
-
-    html += f"""
-        <span class='{cls}' onclick="fetch('/?symbol={sym}')">{sym}</span>
-    """
-
+    html += f"<span class='{cls}' onclick=\"fetch('/?symbol={sym}')\">{sym}</span>"
 html += "</div>"
 
 st.markdown(html, unsafe_allow_html=True)
 
-# قراءة الضغط على الزوج
 query_params = st.experimental_get_query_params()
 if "symbol" in query_params:
     st.session_state.selected_symbol = query_params["symbol"][0]
-# ==============================
-# 5) أزرار الفريمات + جلب الشموع + تشغيل الاستراتيجيات
-# ==============================
 
-st.markdown("<br>", unsafe_allow_html=True)
+
+# ==============================
+# 6) أزرار الفريمات
+# ==============================
 st.markdown("<h3>⏱️ اختر الفريم</h3>", unsafe_allow_html=True)
 
 interval_buttons = {
     "5Min": "5m",
     "15Min": "15m",
-    "1H": "1h",
-    "4H": "4h"
+    "1H": "1H",
+    "4H": "4H"
 }
 
 cols = st.columns(len(interval_buttons))
@@ -254,117 +268,81 @@ for i, (label, interval) in enumerate(interval_buttons.items()):
         st.session_state.selected_interval = interval
         st.session_state.show_market_analysis = False
 
-# زر تحليل السوق
 if st.button("📊 MARKET ANALYSIS"):
     st.session_state.show_market_analysis = True
 
 
 # ==============================
-# 6) جلب الشموع للفريم المختار
+# 7) تحليل السوق
 # ==============================
+def market_overview_okx():
+    url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
+    data = requests.get(url).json()
 
+    if "data" not in data:
+        return None
+
+    df = pd.DataFrame(data["data"])
+    df["change"] = df["last"].astype(float) - df["open24h"].astype(float)
+    df["percent"] = (df["change"] / df["open24h"].astype(float)) * 100
+    df["vol"] = df["volCcy24h"].astype(float)
+
+    gainers = df.sort_values("percent", ascending=False).head(5)
+    losers = df.sort_values("percent", ascending=True).head(5)
+    top_volume = df.sort_values("vol", ascending=False).head(5)
+
+    avg_change = df["percent"].mean()
+    if avg_change > 1:
+        bias = "السوق يميل للصعود"
+    elif avg_change < -1:
+        bias = "السوق يميل للهبوط"
+    else:
+        bias = "السوق متذبذب"
+
+    return {
+        "bias": bias,
+        "gainers": gainers[["instId", "percent"]],
+        "losers": losers[["instId", "percent"]],
+        "top_volume": top_volume[["instId", "vol"]]
+    }
+
+if st.session_state.show_market_analysis:
+    st.markdown("### 📊 تحليل السوق العام")
+    if st.button("⬅️ العودة"):
+        st.session_state.show_market_analysis = False
+        st.experimental_rerun()
+
+    overview = market_overview_okx()
+    if overview:
+        st.write("حالة السوق:", overview["bias"])
+        st.write("### 🔥 أعلى 5 صاعدين")
+        st.table(overview["gainers"])
+        st.write("### ❄️ أعلى 5 هابطين")
+        st.table(overview["losers"])
+        st.write("### 💰 أعلى 5 حجم تداول")
+        st.table(overview["top_volume"])
+
+    st.stop()
+
+
+# ==============================
+# 8) جلب الشموع + الاستراتيجية
+# ==============================
 symbol = st.session_state.selected_symbol
 interval = st.session_state.selected_interval
 
 df = get_klines(symbol, interval)
 
 if df.empty:
-    st.error("⚠️ لا توجد بيانات كافية لهذا الزوج أو الفريم.")
+    st.error("لا توجد بيانات كافية.")
     st.stop()
 
-# ==============================
-# 7) تشغيل الاستراتيجيات
-# ==============================
+signal = full_smc_signal(df)
 
-balance = 1000
-risk_percent = 1
-
-signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
-
-trend = signal.get("trend")
-bos = signal.get("bos")
-choch = signal.get("choch")
-entry = signal.get("entry")
-stop_loss = signal.get("stop")
-target = signal.get("target")
-# ==============================
-# 8) دالة تحليل السوق العام
-# ==============================
-def market_overview():
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-    data = requests.get(url).json()
-    if not isinstance(data, list):
-        return None
-
-    df = pd.DataFrame(data)
-    df = df[df["symbol"].str.endswith("USDT")]
-
-    df["priceChangePercent"] = df["priceChangePercent"].astype(float)
-    df["quoteVolume"] = df["quoteVolume"].astype(float)
-
-    gainers = df.sort_values("priceChangePercent", ascending=False).head(5)
-    losers = df.sort_values("priceChangePercent", ascending=True).head(5)
-    top_volume = df.sort_values("quoteVolume", ascending=False).head(5)
-
-    avg_change = df["priceChangePercent"].mean()
-    if avg_change > 1:
-        bias = "السوق يميل للصعود"
-    elif avg_change < -1:
-        bias = "السوق يميل للهبوط"
-    else:
-        bias = "السوق متذبذب / محايد"
-
-    return {
-        "bias": bias,
-        "avg_change": avg_change,
-        "gainers": gainers[["symbol", "priceChangePercent"]],
-        "losers": losers[["symbol", "priceChangePercent"]],
-        "top_volume": top_volume[["symbol", "quoteVolume"]]
-    }
 
 # ==============================
-# 9) واجهة تحليل السوق + زر العودة
+# 9) الشارت + الملصقات
 # ==============================
-if st.session_state.show_market_analysis:
-    st.markdown("### 📊 تحليل السوق العام")
-    if st.button("⬅️ العودة إلى الشارت"):
-        st.session_state.show_market_analysis = False
-        st.experimental_rerun()
-
-    overview = market_overview()
-    if overview is None:
-        st.error("تعذر جلب بيانات السوق حالياً.")
-        st.stop()
-
-    st.markdown(f"**حالة السوق العامة:** {overview['bias']}")
-    st.markdown(f"متوسط نسبة التغيير في السوق: {overview['avg_change']:.2f}%")
-
-    st.markdown("### 🔥 أنشط 5 عملات صاعدة")
-    st.table(overview["gainers"].rename(columns={
-        "symbol": "العملة",
-        "priceChangePercent": "نسبة التغيير %"
-    }))
-
-    st.markdown("### ❄️ أضعف 5 عملات هابطة")
-    st.table(overview["losers"].rename(columns={
-        "symbol": "العملة",
-        "priceChangePercent": "نسبة التغيير %"
-    }))
-
-    st.markdown("### 💰 أعلى 5 عملات من حيث حجم التداول")
-    top_vol = overview["top_volume"].copy()
-    top_vol["quoteVolume"] = top_vol["quoteVolume"].round(0)
-    st.table(top_vol.rename(columns={
-        "symbol": "العملة",
-        "quoteVolume": "حجم التداول (تقريبي)"
-    }))
-
-    st.stop()
-
-# ==============================
-# 10) شارت Plotly + ملصقات الدخول/الوقف/الهدف
-# ==============================
-
 st.markdown(f"### 📈 الشارت: {symbol} — الفريم: {interval}")
 
 fig = go.Figure(data=[
@@ -373,20 +351,16 @@ fig = go.Figure(data=[
         open=df["open"],
         high=df["high"],
         low=df["low"],
-        close=df["close"],
-        name="Price"
+        close=df["close"]
     )
 ])
 
 fig.update_layout(
-    xaxis_title="الشموع",
-    yaxis_title="السعر",
     template="plotly_dark",
     height=600,
     margin=dict(l=20, r=20, t=40, b=40)
 )
 
-# ملصقات + دبابيس (Entry / Stop / Target)
 shapes = []
 annotations = []
 
@@ -417,27 +391,13 @@ def add_level(price, color, text):
         font=dict(color="white", size=11)
     ))
 
-# دخول أخضر – وقف أحمر – هدف أزرق
-add_level(entry, "lime", "ENTRY")
-add_level(stop_loss, "red", "STOP")
-add_level(target, "deepskyblue", "TARGET")
+add_level(signal.get("entry"), "lime", "ENTRY")
+add_level(signal.get("stop"), "red", "STOP")
+add_level(signal.get("target"), "deepskyblue", "TARGET")
 
 fig.update_layout(shapes=shapes, annotations=annotations)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# معلومات نصية تحت الشارت
-st.markdown("### 🧠 تفاصيل الاستراتيجية على هذا الفريم")
-st.write(f"**الاتجاه العام:** {trend}")
-st.write(f"**BOS:** {bos}")
-st.write(f"**CHOCH:** {choch}")
-
-if signal["type"] != "NONE":
-    st.success(f"إشارة حالية: {signal['type']}")
-    st.write(f"سعر الدخول التقريبي: {entry}")
-    st.write(f"وقف الخسارة: {stop_loss}")
-    st.write(f"الهدف: {target}")
-    st.write(f"حجم الصفقة التقريبي: {signal.get('size', 0):.4f}")
-else:
-    st.warning("لا توجد إشارة دخول متوافقة مع شروط الاستراتيجية حالياً.")
-    
+st.write("### 🧠 تفاصيل الاستراتيجية")
+st.write(signal)
