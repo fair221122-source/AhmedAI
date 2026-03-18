@@ -1,13 +1,17 @@
 import streamlit as st
-from binance.client import Client
+from binance.um_futures import UMFutures
 import pandas as pd
 import numpy as np
 
-# -------- إعداد Binance --------
-client = Client()
+# -------- إعداد Binance Futures --------
+api_key = st.secrets["BINANCE_API_KEY"]
+api_secret = st.secrets["BINANCE_API_SECRET"]
 
+client = UMFutures(key=api_key, secret=api_secret)
+
+# -------- جلب الشموع --------
 def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
-    data = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    data = client.klines(symbol=symbol, interval=interval, limit=limit)
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
         "close_time","qav","num_trades","taker_base","taker_quote","ignore"
@@ -18,6 +22,15 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
     df["close"] = df["close"].astype(float)
     return df
 
+# -------- جلب الرصيد الحقيقي --------
+def get_futures_balance():
+    balances = client.balance()
+    for asset in balances:
+        if asset["asset"] == "USDT":
+            return float(asset["balance"])
+    return 0.0
+
+# -------- التحليل --------
 def market_structure(df):
     if df["close"].iloc[-1] > df["close"].iloc[-5]:
         return "uptrend"
@@ -117,38 +130,50 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
 st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
 
 st.title("🧠 Smart Money Concepts – Institutional Dashboard")
-st.write("فريمات: 5m / 15m قصيرة المدى – 1h متوسطة المدى")
+
+# عرض الرصيد الحقيقي
+real_balance = get_futures_balance()
+st.info(f"💰 رصيد العقود الآجلة الحقيقي: {real_balance} USDT")
 
 symbol = st.sidebar.text_input("الزوج", "BTCUSDT")
-balance = st.sidebar.number_input("رصيد الحساب (افتراضي)", value=1000.0)
+balance = st.sidebar.number_input("رصيد الحساب (افتراضي)", value=real_balance)
 risk_percent = st.sidebar.slider("نسبة المخاطرة لكل صفقة %", 0.1, 5.0, 1.0)
 
+# إضافة فريم 4h
 intervals = {
     "قصير 5m": "5m",
     "قصير 15m": "15m",
-    "متوسط 1h": "1h"
+    "متوسط 1h": "1h",
+    "عالي 4h": "4h"
 }
 
-cols = st.columns(3)
+# ترتيب الواجهة صفين × عمودين
+rows = [
+    ["قصير 5m", "قصير 15m"],
+    ["متوسط 1h", "عالي 4h"]
+]
 
-for i, (label, interval) in enumerate(intervals.items()):
-    with cols[i]:
-        st.subheader(label)
-        df = get_klines(symbol=symbol, interval=interval)
-        signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
+for row in rows:
+    cols = st.columns(2)
+    for i, label in enumerate(row):
+        interval = intervals[label]
+        with cols[i]:
+            st.subheader(label)
+            df = get_klines(symbol=symbol, interval=interval)
+            signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
 
-        st.line_chart(df[["close"]])
+            st.line_chart(df[["close"]])
 
-        st.markdown(f"**الاتجاه:** {market_structure(df)}")
-        st.markdown(f"**BOS:** {detect_bos(df)}")
+            st.markdown(f"**الاتجاه:** {market_structure(df)}")
+            st.markdown(f"**BOS:** {detect_bos(df)}")
 
-        if signal["type"] != "NONE":
-            st.success(f"إشارة: {signal['type']}")
-            st.write(f"دخول: {signal['entry']}")
-            st.write(f"وقف خسارة: {signal['stop']}")
-            st.write(f"هدف: {signal['target']}")
-            st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
-        else:
-            st.warning("لا توجد إشارة واضحة حالياً.")
+            if signal["type"] != "NONE":
+                st.success(f"إشارة: {signal['type']}")
+                st.write(f"دخول: {signal['entry']}")
+                st.write(f"وقف خسارة: {signal['stop']}")
+                st.write(f"هدف: {signal['target']}")
+                st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
+            else:
+                st.warning("لا توجد إشارة واضحة حالياً.")
 
-        st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
+            st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
