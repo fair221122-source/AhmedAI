@@ -2,13 +2,25 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import plotly.graph_objects as go
 
-# -------- جلب الشموع من Binance Public API --------
-def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+# ==============================
+# 1) جلب أزواج Binance Futures
+# ==============================
+def get_futures_symbols():
+    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+    data = requests.get(url).json()
+    symbols = [s["symbol"] for s in data["symbols"] if s["contractType"] == "PERPETUAL"]
+    return symbols
+
+# ==============================
+# 2) جلب الشموع من Binance
+# ==============================
+def get_klines(symbol, interval="5m", limit=50):
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     data = requests.get(url).json()
 
-    if not isinstance(data, list) or len(data) < 20:
+    if not isinstance(data, list) or len(data) < 10:
         return pd.DataFrame()
 
     df = pd.DataFrame(data, columns=[
@@ -23,7 +35,9 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
 
     return df
 
-# -------- التحليل --------
+# ==============================
+# 3) الاستراتيجيات (كما هي)
+# ==============================
 def market_structure(df):
     if len(df) < 6:
         return "no-data"
@@ -115,9 +129,6 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
     ob = order_block(df)
     fvg = detect_fvg(df)
 
-    if ob["bullish_ob"] is None and ob["bearish_ob"] is None:
-        return {"type": "NONE"}
-
     signal = {
         "type": "NONE",
         "trend": trend,
@@ -126,8 +137,7 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
         "fvg": fvg
     }
 
-    # BUY: اتجاه صاعد + (BOS_UP أو CHOCH_UP) + Bullish OB
-    if trend == "uptrend" and (bos == "BOS_UP" or choch == "CHOCH_UP") and ob["bullish_ob"] is not None:
+    if trend == "uptrend" and (bos == "BOS_UP" or choch == "CHOCH_UP") and ob["bullish_ob"]:
         entry = ob["bullish_ob"]
         stop = liq["liquidity_below"]
         size = risk_management(entry, stop, balance, risk_percent)
@@ -135,12 +145,11 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
             "type": "BUY",
             "entry": entry,
             "stop": stop,
-            "size": size,
             "target": liq["liquidity_above"],
+            "size": size
         })
 
-    # SELL: اتجاه هابط + (BOS_DOWN أو CHOCH_DOWN) + Bearish OB
-    elif trend == "downtrend" and (bos == "BOS_DOWN" or choch == "CHOCH_DOWN") and ob["bearish_ob"] is not None:
+    elif trend == "downtrend" and (bos == "BOS_DOWN" or choch == "CHOCH_DOWN") and ob["bearish_ob"]:
         entry = ob["bearish_ob"]
         stop = liq["liquidity_above"]
         size = risk_management(entry, stop, balance, risk_percent)
@@ -148,32 +157,153 @@ def full_smc_signal(df, balance=1000, risk_percent=1):
             "type": "SELL",
             "entry": entry,
             "stop": stop,
-            "size": size,
             "target": liq["liquidity_below"],
+            "size": size
         })
 
     return signal
+# ==============================
+# 4) واجهة Streamlit — الشريط العلوي
+# ==============================
 
-# -------- تحليل السوق العام من Binance --------
-def get_market_tickers():
-    url = "https://api.binance.com/api/v3/ticker/24hr"
+st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
+
+# نستخدم session_state لحفظ الزوج المختار والفريم المختار
+if "selected_symbol" not in st.session_state:
+    st.session_state.selected_symbol = "BTCUSDT"
+
+if "selected_interval" not in st.session_state:
+    st.session_state.selected_interval = "5m"
+
+if "show_market_analysis" not in st.session_state:
+    st.session_state.show_market_analysis = False
+
+st.markdown("""
+    <style>
+        .scroll-container {
+            width: 100%;
+            overflow-x: scroll;
+            white-space: nowrap;
+            padding: 10px;
+            border-bottom: 1px solid #444;
+        }
+        .symbol-btn {
+            display: inline-block;
+            padding: 8px 14px;
+            margin-right: 8px;
+            background: #222;
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid #555;
+            font-size: 15px;
+        }
+        .symbol-btn:hover {
+            background: #333;
+        }
+        .symbol-selected {
+            background: #0a84ff !important;
+            border-color: #0a84ff !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# جلب أزواج Binance Futures
+symbols = get_futures_symbols()
+
+# الشريط العلوي
+st.markdown("<h3 style='margin-top:0;'>📌 اختر زوج العملات</h3>", unsafe_allow_html=True)
+
+html = "<div class='scroll-container'>"
+
+for sym in symbols:
+    cls = "symbol-btn"
+    if sym == st.session_state.selected_symbol:
+        cls += " symbol-selected"
+
+    html += f"""
+        <span class='{cls}' onclick="fetch('/?symbol={sym}')">{sym}</span>
+    """
+
+html += "</div>"
+
+st.markdown(html, unsafe_allow_html=True)
+
+# قراءة الضغط على الزوج
+query_params = st.experimental_get_query_params()
+if "symbol" in query_params:
+    st.session_state.selected_symbol = query_params["symbol"][0]
+# ==============================
+# 5) أزرار الفريمات + جلب الشموع + تشغيل الاستراتيجيات
+# ==============================
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("<h3>⏱️ اختر الفريم</h3>", unsafe_allow_html=True)
+
+interval_buttons = {
+    "5Min": "5m",
+    "15Min": "15m",
+    "1H": "1h",
+    "4H": "4h"
+}
+
+cols = st.columns(len(interval_buttons))
+
+for i, (label, interval) in enumerate(interval_buttons.items()):
+    if cols[i].button(label):
+        st.session_state.selected_interval = interval
+        st.session_state.show_market_analysis = False
+
+# زر تحليل السوق
+if st.button("📊 MARKET ANALYSIS"):
+    st.session_state.show_market_analysis = True
+
+
+# ==============================
+# 6) جلب الشموع للفريم المختار
+# ==============================
+
+symbol = st.session_state.selected_symbol
+interval = st.session_state.selected_interval
+
+df = get_klines(symbol, interval)
+
+if df.empty:
+    st.error("⚠️ لا توجد بيانات كافية لهذا الزوج أو الفريم.")
+    st.stop()
+
+# ==============================
+# 7) تشغيل الاستراتيجيات
+# ==============================
+
+balance = 1000
+risk_percent = 1
+
+signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
+
+trend = signal.get("trend")
+bos = signal.get("bos")
+choch = signal.get("choch")
+entry = signal.get("entry")
+stop_loss = signal.get("stop")
+target = signal.get("target")
+# ==============================
+# 8) دالة تحليل السوق العام
+# ==============================
+def market_overview():
+    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     data = requests.get(url).json()
     if not isinstance(data, list):
-        return pd.DataFrame()
-    df = pd.DataFrame(data)
-    # نركز على أزواج USDT فقط
-    df = df[df["symbol"].str.endswith("USDT")]
-    df["priceChangePercent"] = df["priceChangePercent"].astype(float)
-    df["quoteVolume"] = df["quoteVolume"].astype(float)
-    return df
-
-def market_overview():
-    df = get_market_tickers()
-    if df.empty:
         return None
 
-    gainers = df.sort_values("priceChangePercent", ascending=False).head(3)
-    losers = df.sort_values("priceChangePercent", ascending=True).head(3)
+    df = pd.DataFrame(data)
+    df = df[df["symbol"].str.endswith("USDT")]
+
+    df["priceChangePercent"] = df["priceChangePercent"].astype(float)
+    df["quoteVolume"] = df["quoteVolume"].astype(float)
+
+    gainers = df.sort_values("priceChangePercent", ascending=False).head(5)
+    losers = df.sort_values("priceChangePercent", ascending=True).head(5)
     top_volume = df.sort_values("quoteVolume", ascending=False).head(5)
 
     avg_change = df["priceChangePercent"].mean()
@@ -192,146 +322,122 @@ def market_overview():
         "top_volume": top_volume[["symbol", "quoteVolume"]]
     }
 
-# -------- واجهة Streamlit --------
-st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
-st.title("🧠 Smart Money Concepts – Institutional Dashboard")
+# ==============================
+# 9) واجهة تحليل السوق + زر العودة
+# ==============================
+if st.session_state.show_market_analysis:
+    st.markdown("### 📊 تحليل السوق العام")
+    if st.button("⬅️ العودة إلى الشارت"):
+        st.session_state.show_market_analysis = False
+        st.experimental_rerun()
 
-symbol = st.sidebar.text_input("الزوج", "BTCUSDT")
-balance = st.sidebar.number_input("رصيد الحساب (يدوي)", value=1000.0)
-risk_percent = st.sidebar.slider("نسبة المخاطرة لكل صفقة %", 0.1, 5.0, 1.0)
+    overview = market_overview()
+    if overview is None:
+        st.error("تعذر جلب بيانات السوق حالياً.")
+        st.stop()
 
-intervals = {
-    "قصير 5m": "5m",
-    "قصير 15m": "15m",
-    "متوسط 1h": "1h",
-    "عالي 4h": "4h"
-}
+    st.markdown(f"**حالة السوق العامة:** {overview['bias']}")
+    st.markdown(f"متوسط نسبة التغيير في السوق: {overview['avg_change']:.2f}%")
 
-# نخزن نتائج الفريمات للملخص
-frame_results = {}
+    st.markdown("### 🔥 أنشط 5 عملات صاعدة")
+    st.table(overview["gainers"].rename(columns={
+        "symbol": "العملة",
+        "priceChangePercent": "نسبة التغيير %"
+    }))
 
-# صف أول: 5m - 15m - 1h
-row1 = st.columns(3)
-labels_row1 = ["قصير 5m", "قصير 15m", "متوسط 1h"]
+    st.markdown("### ❄️ أضعف 5 عملات هابطة")
+    st.table(overview["losers"].rename(columns={
+        "symbol": "العملة",
+        "priceChangePercent": "نسبة التغيير %"
+    }))
 
-for col, label in zip(row1, labels_row1):
-    interval = intervals[label]
-    with col:
-        st.subheader(label)
-        df = get_klines(symbol=symbol, interval=interval)
-        if df.empty or len(df) < 20:
-            st.error("⚠️ لا توجد بيانات كافية لهذا الفريم.")
-            frame_results[label] = {"trend": "no-data", "signal": "NONE"}
-            continue
+    st.markdown("### 💰 أعلى 5 عملات من حيث حجم التداول")
+    top_vol = overview["top_volume"].copy()
+    top_vol["quoteVolume"] = top_vol["quoteVolume"].round(0)
+    st.table(top_vol.rename(columns={
+        "symbol": "العملة",
+        "quoteVolume": "حجم التداول (تقريبي)"
+    }))
 
-        signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
-        frame_results[label] = {
-            "trend": signal.get("trend", "no-data"),
-            "signal": signal.get("type", "NONE")
-        }
+    st.stop()
 
-        st.line_chart(df[["close"]])
+# ==============================
+# 10) شارت Plotly + ملصقات الدخول/الوقف/الهدف
+# ==============================
 
-        st.markdown(f"**الاتجاه:** {signal.get('trend')}")
-        st.markdown(f"**BOS:** {signal.get('bos')}")
-        st.markdown(f"**CHOCH:** {signal.get('choch')}")
+st.markdown(f"### 📈 الشارت: {symbol} — الفريم: {interval}")
 
-        if signal["type"] != "NONE":
-            st.success(f"إشارة: {signal['type']}")
-            st.write(f"دخول: {signal['entry']}")
-            st.write(f"وقف خسارة: {signal['stop']}")
-            st.write(f"هدف: {signal['target']}")
-            st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
-        else:
-            st.warning("لا توجد إشارة دخول متوافقة مع الشروط حالياً.")
+fig = go.Figure(data=[
+    go.Candlestick(
+        x=df.index,
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        name="Price"
+    )
+])
 
-        st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
+fig.update_layout(
+    xaxis_title="الشموع",
+    yaxis_title="السعر",
+    template="plotly_dark",
+    height=600,
+    margin=dict(l=20, r=20, t=40, b=40)
+)
 
-# صف ثاني: 4h - Summary - Market Analysis
-row2 = st.columns(3)
-labels_row2 = ["عالي 4h"]
+# ملصقات + دبابيس (Entry / Stop / Target)
+shapes = []
+annotations = []
 
-# مربع 4h
-with row2[0]:
-    label = "عالي 4h"
-    interval = intervals[label]
-    st.subheader(label)
-    df = get_klines(symbol=symbol, interval=interval)
-    if df.empty or len(df) < 20:
-        st.error("⚠️ لا توجد بيانات كافية لهذا الفريم.")
-        frame_results[label] = {"trend": "no-data", "signal": "NONE"}
-    else:
-        signal = full_smc_signal(df, balance=balance, risk_percent=risk_percent)
-        frame_results[label] = {
-            "trend": signal.get("trend", "no-data"),
-            "signal": signal.get("type", "NONE")
-        }
+def add_level(price, color, text):
+    if price is None:
+        return
+    shapes.append(dict(
+        type="line",
+        x0=df.index[0],
+        x1=df.index[-1],
+        y0=price,
+        y1=price,
+        line=dict(color=color, width=1.5, dash="dot")
+    ))
+    annotations.append(dict(
+        x=df.index[-1],
+        y=price,
+        xanchor="left",
+        showarrow=True,
+        arrowhead=1,
+        arrowsize=1,
+        arrowwidth=1,
+        arrowcolor=color,
+        bgcolor="rgba(0,0,0,0.6)",
+        bordercolor=color,
+        borderwidth=1,
+        text=text,
+        font=dict(color="white", size=11)
+    ))
 
-        st.line_chart(df[["close"]])
+# دخول أخضر – وقف أحمر – هدف أزرق
+add_level(entry, "lime", "ENTRY")
+add_level(stop_loss, "red", "STOP")
+add_level(target, "deepskyblue", "TARGET")
 
-        st.markdown(f"**الاتجاه:** {signal.get('trend')}")
-        st.markdown(f"**BOS:** {signal.get('bos')}")
-        st.markdown(f"**CHOCH:** {signal.get('choch')}")
+fig.update_layout(shapes=shapes, annotations=annotations)
 
-        if signal["type"] != "NONE":
-            st.success(f"إشارة: {signal['type']}")
-            st.write(f"دخول: {signal['entry']}")
-            st.write(f"وقف خسارة: {signal['stop']}")
-            st.write(f"هدف: {signal['target']}")
-            st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
-        else:
-            st.warning("لا توجد إشارة دخول متوافقة مع الشروط حالياً.")
+st.plotly_chart(fig, use_container_width=True)
 
-        st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
+# معلومات نصية تحت الشارت
+st.markdown("### 🧠 تفاصيل الاستراتيجية على هذا الفريم")
+st.write(f"**الاتجاه العام:** {trend}")
+st.write(f"**BOS:** {bos}")
+st.write(f"**CHOCH:** {choch}")
 
-# مربع الملخص Summary
-with row2[1]:
-    st.subheader("📊 ملخص الفريمات")
-    if frame_results:
-        for frame, res in frame_results.items():
-            st.markdown(f"**{frame}** → اتجاه: {res['trend']} | إشارة: {res['signal']}")
-        # اتجاه عام بسيط
-        buy_count = sum(1 for r in frame_results.values() if r["signal"] == "BUY")
-        sell_count = sum(1 for r in frame_results.values() if r["signal"] == "SELL")
-        if buy_count > sell_count and buy_count >= 2:
-            st.success("الاتجاه العام يميل للشراء (Confluence BUY).")
-        elif sell_count > buy_count and sell_count >= 2:
-            st.error("الاتجاه العام يميل للبيع (Confluence SELL).")
-        else:
-            st.warning("لا يوجد توافق قوي بين الفريمات حالياً.")
-    else:
-        st.write("لا توجد بيانات كافية لعرض الملخص.")
-
-# مربع تحليل السوق Market Analysis
-with row2[2]:
-    st.subheader("🌍 تحليل السوق العام")
-    analyze = st.button("تحليل السوق الآن")
-    if analyze:
-        overview = market_overview()
-        if overview is None:
-            st.error("تعذر جلب بيانات السوق حالياً.")
-        else:
-            st.markdown(f"**حالة السوق العامة:** {overview['bias']}")
-            st.markdown(f"متوسط نسبة التغيير في السوق: {overview['avg_change']:.2f}%")
-
-            st.markdown("### 📈 أقوى 3 عملات صاعدة")
-            st.table(overview["gainers"].rename(columns={
-                "symbol": "العملة",
-                "priceChangePercent": "نسبة التغيير %"
-            }))
-
-            st.markdown("### 📉 أقوى 3 عملات هابطة")
-            st.table(overview["losers"].rename(columns={
-                "symbol": "العملة",
-                "priceChangePercent": "نسبة التغيير %"
-            }))
-
-            st.markdown("### 💰 أعلى 5 عملات من حيث حجم التداول")
-            top_vol = overview["top_volume"].copy()
-            top_vol["quoteVolume"] = top_vol["quoteVolume"].round(0)
-            st.table(top_vol.rename(columns={
-                "symbol": "العملة",
-                "quoteVolume": "حجم التداول (تقريبي)"
-            }))
-    else:
-        st.info("اضغط على زر (تحليل السوق الآن) لعرض أنشط العملات واتجاه السوق.")
+if signal["type"] != "NONE":
+    st.success(f"إشارة حالية: {signal['type']}")
+    st.write(f"سعر الدخول التقريبي: {entry}")
+    st.write(f"وقف الخسارة: {stop_loss}")
+    st.write(f"الهدف: {target}")
+    st.write(f"حجم الصفقة التقريبي: {signal.get('size', 0):.4f}")
+else:
+    st.warning("لا توجد إشارة دخول متوافقة مع شروط الاستراتيجية حالياً.")
+    
