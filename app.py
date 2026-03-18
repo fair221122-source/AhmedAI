@@ -23,14 +23,17 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
 
     return df
 
-
 # -------- التحليل --------
 def market_structure(df):
     if len(df) < 6:
         return "no-data"
-    return "uptrend" if df["close"].iloc[-1] > df["close"].iloc[-5] else \
-           "downtrend" if df["close"].iloc[-1] < df["close"].iloc[-5] else "sideways"
-
+    last = df["close"].iloc[-1]
+    prev = df["close"].iloc[-5]
+    if last > prev:
+        return "uptrend"
+    elif last < prev:
+        return "downtrend"
+    return "sideways"
 
 def detect_bos(df):
     if len(df) < 3:
@@ -44,6 +47,22 @@ def detect_bos(df):
         return "BOS_DOWN"
     return None
 
+def detect_choch(df):
+    if len(df) < 6:
+        return None
+    # نستخدم نفس منطق الاتجاه لكن نراقب كسر عكسي
+    last_high = df["high"].iloc[-2]
+    last_low = df["low"].iloc[-2]
+    close = df["close"].iloc[-1]
+    prev_close = df["close"].iloc[-5]
+
+    # إذا كان كان هابط ثم حصل كسر لأعلى → CHOCH_UP
+    if close > last_high and close > prev_close:
+        return "CHOCH_UP"
+    # إذا كان كان صاعد ثم حصل كسر لأسفل → CHOCH_DOWN
+    if close < last_low and close < prev_close:
+        return "CHOCH_DOWN"
+    return None
 
 def liquidity_zones(df):
     if len(df) < 20:
@@ -53,22 +72,17 @@ def liquidity_zones(df):
         "liquidity_below": df["low"].rolling(10).min().iloc[-1]
     }
 
-
 def order_block(df):
     if len(df) < 10:
         return {"bullish_ob": None, "bearish_ob": None}
-
     bearish = df[df["close"] < df["open"]]
     bullish = df[df["close"] > df["open"]]
-
     if bearish.empty or bullish.empty:
         return {"bullish_ob": None, "bearish_ob": None}
-
     return {
         "bullish_ob": bearish.iloc[-1]["low"],
         "bearish_ob": bullish.iloc[-1]["high"]
     }
-
 
 def detect_fvg(df):
     if len(df) < 3:
@@ -85,7 +99,6 @@ def detect_fvg(df):
             fvg_list.append(("bearish", curr_high, prev_low))
     return fvg_list
 
-
 def risk_management(entry, stop, balance=1000, risk_percent=1):
     if entry is None or stop is None:
         return 0
@@ -94,38 +107,55 @@ def risk_management(entry, stop, balance=1000, risk_percent=1):
         return 0
     return (balance * (risk_percent / 100)) / stop_distance
 
-
 def full_smc_signal(df, balance=1000, risk_percent=1):
     if len(df) < 20:
         return {"type": "NONE"}
 
     trend = market_structure(df)
     bos = detect_bos(df)
+    choch = detect_choch(df)
     liq = liquidity_zones(df)
     ob = order_block(df)
     fvg = detect_fvg(df)
 
-    if ob["bullish_ob"] is None or ob["bearish_ob"] is None:
+    if ob["bullish_ob"] is None and ob["bearish_ob"] is None:
         return {"type": "NONE"}
 
     signal = {"type": "NONE"}
 
-    if trend == "uptrend" and bos == "BOS_UP":
+    # BUY: اتجاه صاعد + (BOS_UP أو CHOCH_UP) + Bullish OB
+    if trend == "uptrend" and (bos == "BOS_UP" or choch == "CHOCH_UP") and ob["bullish_ob"] is not None:
         entry = ob["bullish_ob"]
         stop = liq["liquidity_below"]
         size = risk_management(entry, stop, balance, risk_percent)
-        signal.update({"type": "BUY", "entry": entry, "stop": stop,
-                       "size": size, "target": liq["liquidity_above"], "fvg": fvg})
+        signal.update({
+            "type": "BUY",
+            "entry": entry,
+            "stop": stop,
+            "size": size,
+            "target": liq["liquidity_above"],
+            "fvg": fvg,
+            "bos": bos,
+            "choch": choch
+        })
 
-    elif trend == "downtrend" and bos == "BOS_DOWN":
+    # SELL: اتجاه هابط + (BOS_DOWN أو CHOCH_DOWN) + Bearish OB
+    elif trend == "downtrend" and (bos == "BOS_DOWN" or choch == "CHOCH_DOWN") and ob["bearish_ob"] is not None:
         entry = ob["bearish_ob"]
         stop = liq["liquidity_above"]
         size = risk_management(entry, stop, balance, risk_percent)
-        signal.update({"type": "SELL", "entry": entry, "stop": stop,
-                       "size": size, "target": liq["liquidity_below"], "fvg": fvg})
+        signal.update({
+            "type": "SELL",
+            "entry": entry,
+            "stop": stop,
+            "size": size,
+            "target": liq["liquidity_below"],
+            "fvg": fvg,
+            "bos": bos,
+            "choch": choch
+        })
 
     return signal
-
 
 # -------- واجهة Streamlit --------
 st.set_page_config(page_title="Smart Money Dashboard", layout="wide")
@@ -166,6 +196,7 @@ for row in rows:
 
             st.markdown(f"**الاتجاه:** {market_structure(df)}")
             st.markdown(f"**BOS:** {detect_bos(df)}")
+            st.markdown(f"**CHOCH:** {detect_choch(df)}")
 
             if signal["type"] != "NONE":
                 st.success(f"إشارة: {signal['type']}")
@@ -174,6 +205,6 @@ for row in rows:
                 st.write(f"هدف: {signal['target']}")
                 st.write(f"حجم الصفقة التقريبي: {signal['size']:.4f}")
             else:
-                st.warning("لا توجد إشارة واضحة حالياً.")
+                st.warning("لا توجد إشارة دخول متوافقة مع الشروط حالياً.")
 
             st.write("عدد FVG المكتشفة:", len(signal.get("fvg", [])))
