@@ -244,10 +244,7 @@ html += "</div>"
 
 st.markdown(html, unsafe_allow_html=True)
 
-query_params = st.experimental_get_query_params()
-if "symbol" in query_params:
-    st.session_state.selected_symbol = query_params["symbol"][0]
-
+pass
 
 # ==============================
 # 6) أزرار الفريمات
