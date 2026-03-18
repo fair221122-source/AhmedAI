@@ -1,5 +1,5 @@
 import streamlit as st
-from binance.um_futures import UMFutures
+from binance.client import Client
 import pandas as pd
 import numpy as np
 
@@ -7,11 +7,11 @@ import numpy as np
 api_key = st.secrets["BINANCE_API_KEY"]
 api_secret = st.secrets["BINANCE_API_SECRET"]
 
-client = UMFutures(key=api_key, secret=api_secret)
+client = Client(api_key, api_secret)
 
 # -------- جلب الشموع --------
 def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
-    data = client.klines(symbol=symbol, interval=interval, limit=limit)
+    data = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
         "close_time","qav","num_trades","taker_base","taker_quote","ignore"
@@ -24,7 +24,7 @@ def get_klines(symbol="BTCUSDT", interval="5m", limit=500):
 
 # -------- جلب الرصيد الحقيقي --------
 def get_futures_balance():
-    balances = client.balance()
+    balances = client.futures_account_balance()
     for asset in balances:
         if asset["asset"] == "USDT":
             return float(asset["balance"])
